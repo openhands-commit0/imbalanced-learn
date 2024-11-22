@@ -387,7 +387,9 @@ if parse_version(sklearn_version.base_version) < parse_version('1.4'):
                 common = existing & upcoming
                 conflicts = [key for key in common if requests[key] != mmr._requests[key]]
                 if conflicts:
-                    raise ValueError(f'Conflicting metadata requests for {', '.join(conflicts)} while composing the requests for {name}. Metadata with the same name for methods {', '.join(COMPOSITE_METHODS[name])} should have the same request value.')
+                    conflicts_str = ', '.join(conflicts)
+                    methods_str = ', '.join(COMPOSITE_METHODS[name])
+                    raise ValueError(f'Conflicting metadata requests for {conflicts_str} while composing the requests for {name}. Metadata with the same name for methods {methods_str} should have the same request value.')
                 requests.update(mmr._requests)
             return MethodMetadataRequest(owner=self.owner, method=name, requests=requests)
 
