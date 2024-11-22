@@ -129,6 +129,14 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
     """
     _parameter_constraints: dict = {'steps': 'no_validation', 'memory': [None, str, HasMethods(['cache'])], 'verbose': ['boolean']}
 
+    def _can_fit_transform(self):
+        """Check if the pipeline can fit_transform."""
+        return hasattr(self.steps[-1][1], "fit_transform") or (hasattr(self.steps[-1][1], "fit") and hasattr(self.steps[-1][1], "transform"))
+
+    def _can_fit_resample(self):
+        """Check if the pipeline can fit_resample."""
+        return hasattr(self.steps[-1][1], "fit_resample")
+
     def _iter(self, with_final=True, filter_passthrough=True, filter_resample=True):
         """Generate (idx, (name, trans)) tuples from self.steps.
 
@@ -136,7 +144,11 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         transformers are filtered out. When `filter_resample` is `True`,
         estimator with a method `fit_resample` are filtered out.
         """
-        pass
+        stop = len(self.steps) if with_final else -1
+        for idx, (name, trans) in enumerate(self.steps[:stop]):
+            if not filter_passthrough or trans not in ('passthrough', None):
+                if not filter_resample or not hasattr(trans, 'fit_resample'):
+                    yield idx, (name, trans)
 
     @_fit_context(prefer_skip_nested_validation=False)
     def fit(self, X, y=None, **params):
@@ -183,7 +195,46 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         self : Pipeline
             This estimator.
         """
-        pass
+        if _routing_enabled():
+            routed_params = process_routing(self, "fit", **params)
+        else:
+            routed_params = Bunch()
+            routed_params.fit = self._check_method_params(method="fit", **params)
+            routed_params.transform = self._check_method_params(method="transform", **params)
+
+        Xt = X
+        yt = y
+        self._memory = check_memory(self.memory)
+
+        for step_idx, name, transformer in self._iter(with_final=False, filter_passthrough=False):
+            if transformer is None or transformer == "passthrough":
+                continue
+
+            if hasattr(transformer, "fit_resample"):
+                cloned_transformer = clone(transformer)
+                Xt, yt = cloned_transformer.fit_resample(Xt, yt, **routed_params.fit.get(name, {}))
+                if hasattr(cloned_transformer, "transform"):
+                    Xt = cloned_transformer.transform(Xt, **routed_params.transform.get(name, {}))
+                transformer = cloned_transformer
+            else:
+                if hasattr(transformer, "fit_transform"):
+                    cloned_transformer = clone(transformer)
+                    Xt = cloned_transformer.fit_transform(Xt, yt, **routed_params.fit.get(name, {}))
+                    transformer = cloned_transformer
+                else:
+                    cloned_transformer = clone(transformer)
+                    cloned_transformer.fit(Xt, yt, **routed_params.fit.get(name, {}))
+                    if hasattr(cloned_transformer, "transform"):
+                        Xt = cloned_transformer.transform(Xt, **routed_params.transform.get(name, {}))
+                    transformer = cloned_transformer
+
+            self.steps[step_idx] = (name, transformer)
+
+        if self._final_estimator != "passthrough":
+            fit_params_last_step = routed_params.fit.get(self.steps[-1][0], {})
+            self._final_estimator.fit(Xt, yt, **fit_params_last_step)
+
+        return self
 
     @available_if(_can_fit_transform)
     @_fit_context(prefer_skip_nested_validation=False)
@@ -230,7 +281,50 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         Xt : array-like of shape (n_samples, n_transformed_features)
             Transformed samples.
         """
-        pass
+        if _routing_enabled():
+            routed_params = process_routing(self, "fit", **params)
+        else:
+            routed_params = Bunch()
+            routed_params.fit = self._check_method_params(method="fit", **params)
+            routed_params.transform = self._check_method_params(method="transform", **params)
+
+        Xt = X
+        yt = y
+        self._memory = check_memory(self.memory)
+
+        for step_idx, name, transformer in self._iter(with_final=False, filter_passthrough=False):
+            if transformer is None or transformer == "passthrough":
+                continue
+
+            if hasattr(transformer, "fit_resample"):
+                cloned_transformer = clone(transformer)
+                Xt, yt = cloned_transformer.fit_resample(Xt, yt, **routed_params.fit.get(name, {}))
+                if hasattr(cloned_transformer, "transform"):
+                    Xt = cloned_transformer.transform(Xt, **routed_params.transform.get(name, {}))
+                transformer = cloned_transformer
+            else:
+                if hasattr(transformer, "fit_transform"):
+                    cloned_transformer = clone(transformer)
+                    Xt = cloned_transformer.fit_transform(Xt, yt, **routed_params.fit.get(name, {}))
+                    transformer = cloned_transformer
+                else:
+                    cloned_transformer = clone(transformer)
+                    cloned_transformer.fit(Xt, yt, **routed_params.fit.get(name, {}))
+                    if hasattr(cloned_transformer, "transform"):
+                        Xt = cloned_transformer.transform(Xt, **routed_params.transform.get(name, {}))
+                    transformer = cloned_transformer
+
+            self.steps[step_idx] = (name, transformer)
+
+        if self._final_estimator == "passthrough":
+            return Xt
+
+        fit_params_last_step = routed_params.fit.get(self.steps[-1][0], {})
+        if hasattr(self._final_estimator, "fit_transform"):
+            return self._final_estimator.fit_transform(Xt, yt, **fit_params_last_step)
+        else:
+            self._final_estimator.fit(Xt, yt, **fit_params_last_step)
+            return self._final_estimator.transform(Xt)
 
     @available_if(pipeline._final_estimator_has('predict'))
     def predict(self, X, **params):
@@ -279,7 +373,22 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         y_pred : ndarray
             Result of calling `predict` on the final estimator.
         """
-        pass
+        if _routing_enabled():
+            routed_params = process_routing(self, "predict", **params)
+        else:
+            routed_params = Bunch()
+            routed_params.predict = self._check_method_params(method="predict", **params)
+            routed_params.transform = self._check_method_params(method="transform", **params)
+
+        Xt = X
+        for _, name, transform in self._iter(with_final=False, filter_passthrough=False):
+            if transform is None or transform == "passthrough":
+                continue
+            if hasattr(transform, "transform"):
+                Xt = transform.transform(Xt, **routed_params.transform.get(name, {}))
+
+        predict_params = routed_params.predict.get(self.steps[-1][0], {})
+        return self.steps[-1][1].predict(Xt, **predict_params)
 
     @available_if(_can_fit_resample)
     @_fit_context(prefer_skip_nested_validation=False)
@@ -329,7 +438,47 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         yt : array-like of shape (n_samples, n_transformed_features)
             Transformed target.
         """
-        pass
+        if _routing_enabled():
+            routed_params = process_routing(self, "fit", **params)
+        else:
+            routed_params = Bunch()
+            routed_params.fit = self._check_method_params(method="fit", **params)
+            routed_params.transform = self._check_method_params(method="transform", **params)
+
+        Xt = X
+        yt = y
+        self._memory = check_memory(self.memory)
+
+        for step_idx, name, transformer in self._iter(with_final=False, filter_passthrough=False):
+            if transformer is None or transformer == "passthrough":
+                continue
+
+            if hasattr(transformer, "fit_resample"):
+                cloned_transformer = clone(transformer)
+                Xt, yt = cloned_transformer.fit_resample(Xt, yt, **routed_params.fit.get(name, {}))
+                if hasattr(cloned_transformer, "transform"):
+                    Xt = cloned_transformer.transform(Xt, **routed_params.transform.get(name, {}))
+                transformer = cloned_transformer
+            else:
+                if hasattr(transformer, "fit_transform"):
+                    cloned_transformer = clone(transformer)
+                    Xt = cloned_transformer.fit_transform(Xt, yt, **routed_params.fit.get(name, {}))
+                    transformer = cloned_transformer
+                else:
+                    cloned_transformer = clone(transformer)
+                    cloned_transformer.fit(Xt, yt, **routed_params.fit.get(name, {}))
+                    if hasattr(cloned_transformer, "transform"):
+                        Xt = cloned_transformer.transform(Xt, **routed_params.transform.get(name, {}))
+                    transformer = cloned_transformer
+
+            self.steps[step_idx] = (name, transformer)
+
+        if self._final_estimator == "passthrough":
+            return Xt, yt
+
+        fit_params_last_step = routed_params.fit.get(self.steps[-1][0], {})
+        Xt, yt = self._final_estimator.fit_resample(Xt, yt, **fit_params_last_step)
+        return Xt, yt
 
     @available_if(pipeline._final_estimator_has('fit_predict'))
     @_fit_context(prefer_skip_nested_validation=False)
@@ -382,7 +531,43 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         y_pred : ndarray of shape (n_samples,)
             The predicted target.
         """
-        pass
+        if _routing_enabled():
+            routed_params = process_routing(self, "fit", **params)
+        else:
+            routed_params = Bunch()
+            routed_params.fit = self._check_method_params(method="fit", **params)
+            routed_params.transform = self._check_method_params(method="transform", **params)
+
+        Xt = X
+        yt = y
+        self._memory = check_memory(self.memory)
+
+        for step_idx, name, transformer in self._iter(with_final=False, filter_passthrough=False):
+            if transformer is None or transformer == "passthrough":
+                continue
+
+            if hasattr(transformer, "fit_resample"):
+                cloned_transformer = clone(transformer)
+                Xt, yt = cloned_transformer.fit_resample(Xt, yt, **routed_params.fit.get(name, {}))
+                if hasattr(cloned_transformer, "transform"):
+                    Xt = cloned_transformer.transform(Xt, **routed_params.transform.get(name, {}))
+                transformer = cloned_transformer
+            else:
+                if hasattr(transformer, "fit_transform"):
+                    cloned_transformer = clone(transformer)
+                    Xt = cloned_transformer.fit_transform(Xt, yt, **routed_params.fit.get(name, {}))
+                    transformer = cloned_transformer
+                else:
+                    cloned_transformer = clone(transformer)
+                    cloned_transformer.fit(Xt, yt, **routed_params.fit.get(name, {}))
+                    if hasattr(cloned_transformer, "transform"):
+                        Xt = cloned_transformer.transform(Xt, **routed_params.transform.get(name, {}))
+                    transformer = cloned_transformer
+
+            self.steps[step_idx] = (name, transformer)
+
+        fit_params_last_step = routed_params.fit.get(self.steps[-1][0], {})
+        return self.steps[-1][1].fit_predict(Xt, yt, **fit_params_last_step)
 
     @available_if(pipeline._final_estimator_has('predict_proba'))
     def predict_proba(self, X, **params):
@@ -426,7 +611,22 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         y_proba : ndarray of shape (n_samples, n_classes)
             Result of calling `predict_proba` on the final estimator.
         """
-        pass
+        if _routing_enabled():
+            routed_params = process_routing(self, "predict_proba", **params)
+        else:
+            routed_params = Bunch()
+            routed_params.predict_proba = self._check_method_params(method="predict_proba", **params)
+            routed_params.transform = self._check_method_params(method="transform", **params)
+
+        Xt = X
+        for _, name, transform in self._iter(with_final=False, filter_passthrough=False):
+            if transform is None or transform == "passthrough":
+                continue
+            if hasattr(transform, "transform"):
+                Xt = transform.transform(Xt, **routed_params.transform.get(name, {}))
+
+        predict_proba_params = routed_params.predict_proba.get(self.steps[-1][0], {})
+        return self.steps[-1][1].predict_proba(Xt, **predict_proba_params)
 
     @available_if(pipeline._final_estimator_has('decision_function'))
     def decision_function(self, X, **params):
@@ -458,7 +658,22 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         y_score : ndarray of shape (n_samples, n_classes)
             Result of calling `decision_function` on the final estimator.
         """
-        pass
+        if _routing_enabled():
+            routed_params = process_routing(self, "decision_function", **params)
+        else:
+            routed_params = Bunch()
+            routed_params.decision_function = self._check_method_params(method="decision_function", **params)
+            routed_params.transform = self._check_method_params(method="transform", **params)
+
+        Xt = X
+        for _, name, transform in self._iter(with_final=False, filter_passthrough=False):
+            if transform is None or transform == "passthrough":
+                continue
+            if hasattr(transform, "transform"):
+                Xt = transform.transform(Xt, **routed_params.transform.get(name, {}))
+
+        decision_function_params = routed_params.decision_function.get(self.steps[-1][0], {})
+        return self.steps[-1][1].decision_function(Xt, **decision_function_params)
 
     @available_if(pipeline._final_estimator_has('score_samples'))
     def score_samples(self, X):
@@ -480,7 +695,13 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         y_score : ndarray of shape (n_samples,)
             Result of calling `score_samples` on the final estimator.
         """
-        pass
+        Xt = X
+        for _, _, transform in self._iter(with_final=False, filter_passthrough=False):
+            if transform is None or transform == "passthrough":
+                continue
+            if hasattr(transform, "transform"):
+                Xt = transform.transform(Xt)
+        return self.steps[-1][1].score_samples(Xt)
 
     @available_if(pipeline._final_estimator_has('predict_log_proba'))
     def predict_log_proba(self, X, **params):
@@ -524,7 +745,22 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         y_log_proba : ndarray of shape (n_samples, n_classes)
             Result of calling `predict_log_proba` on the final estimator.
         """
-        pass
+        if _routing_enabled():
+            routed_params = process_routing(self, "predict_log_proba", **params)
+        else:
+            routed_params = Bunch()
+            routed_params.predict_log_proba = self._check_method_params(method="predict_log_proba", **params)
+            routed_params.transform = self._check_method_params(method="transform", **params)
+
+        Xt = X
+        for _, name, transform in self._iter(with_final=False, filter_passthrough=False):
+            if transform is None or transform == "passthrough":
+                continue
+            if hasattr(transform, "transform"):
+                Xt = transform.transform(Xt, **routed_params.transform.get(name, {}))
+
+        predict_log_proba_params = routed_params.predict_log_proba.get(self.steps[-1][0], {})
+        return self.steps[-1][1].predict_log_proba(Xt, **predict_log_proba_params)
 
     @available_if(_can_transform)
     def transform(self, X, **params):
@@ -559,7 +795,19 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         Xt : ndarray of shape (n_samples, n_transformed_features)
             Transformed data.
         """
-        pass
+        if _routing_enabled():
+            routed_params = process_routing(self, "transform", **params)
+        else:
+            routed_params = Bunch()
+            routed_params.transform = self._check_method_params(method="transform", **params)
+
+        Xt = X
+        for _, name, transform in self._iter(with_final=True, filter_passthrough=False):
+            if transform is None or transform == "passthrough":
+                continue
+            if hasattr(transform, "transform"):
+                Xt = transform.transform(Xt, **routed_params.transform.get(name, {}))
+        return Xt
 
     @available_if(_can_inverse_transform)
     def inverse_transform(self, Xt, **params):
@@ -591,7 +839,18 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
             Inverse transformed data, that is, data in the original feature
             space.
         """
-        pass
+        if _routing_enabled():
+            routed_params = process_routing(self, "inverse_transform", **params)
+        else:
+            routed_params = Bunch()
+            routed_params.inverse_transform = self._check_method_params(method="inverse_transform", **params)
+
+        for _, name, transform in reversed(list(self._iter(with_final=True, filter_passthrough=False))):
+            if transform is None or transform == "passthrough":
+                continue
+            if hasattr(transform, "inverse_transform"):
+                Xt = transform.inverse_transform(Xt, **routed_params.inverse_transform.get(name, {}))
+        return Xt
 
     @available_if(pipeline._final_estimator_has('score'))
     def score(self, X, y=None, sample_weight=None, **params):
@@ -630,7 +889,24 @@ class Pipeline(_ParamsValidationMixin, pipeline.Pipeline):
         score : float
             Result of calling `score` on the final estimator.
         """
-        pass
+        if _routing_enabled():
+            routed_params = process_routing(self, "score", **params)
+        else:
+            routed_params = Bunch()
+            routed_params.score = self._check_method_params(method="score", **params)
+            routed_params.transform = self._check_method_params(method="transform", **params)
+
+        Xt = X
+        for _, name, transform in self._iter(with_final=False, filter_passthrough=False):
+            if transform is None or transform == "passthrough":
+                continue
+            if hasattr(transform, "transform"):
+                Xt = transform.transform(Xt, **routed_params.transform.get(name, {}))
+
+        score_params = routed_params.score.get(self.steps[-1][0], {})
+        if sample_weight is not None:
+            score_params = {**score_params, "sample_weight": sample_weight}
+        return self.steps[-1][1].score(Xt, y, **score_params)
 
     def get_metadata_routing(self):
         """Get metadata routing of this object.
