@@ -448,7 +448,8 @@ if sklearn_version < parse_version('1.4'):
             return any(c.is_satisfied_by(val) for c in self._constraints)
 
         def __str__(self):
-            return f'{', '.join([str(c) for c in self._constraints[:-1]])} or {self._constraints[-1]}'
+            constraints_str = ', '.join(str(c) for c in self._constraints[:-1])
+            return f'{constraints_str} or {self._constraints[-1]}'
 
     class _Booleans(_Constraint):
         """Constraint representing boolean likes.
@@ -465,7 +466,8 @@ if sklearn_version < parse_version('1.4'):
             return any(c.is_satisfied_by(val) for c in self._constraints)
 
         def __str__(self):
-            return f'{', '.join([str(c) for c in self._constraints[:-1]])} or {self._constraints[-1]}'
+            constraints_str = ', '.join(str(c) for c in self._constraints[:-1])
+            return f'{constraints_str} or {self._constraints[-1]}'
 
     class _VerboseHelper(_Constraint):
         """Helper constraint for the verbose parameter.
@@ -482,7 +484,8 @@ if sklearn_version < parse_version('1.4'):
             return any(c.is_satisfied_by(val) for c in self._constraints)
 
         def __str__(self):
-            return f'{', '.join([str(c) for c in self._constraints[:-1]])} or {self._constraints[-1]}'
+            constraints_str = ', '.join(str(c) for c in self._constraints[:-1])
+            return f'{constraints_str} or {self._constraints[-1]}'
 
     class MissingValues(_Constraint):
         """Helper constraint for the `missing_values` parameters.
@@ -515,7 +518,8 @@ if sklearn_version < parse_version('1.4'):
             return any(c.is_satisfied_by(val) for c in self._constraints)
 
         def __str__(self):
-            return f'{', '.join([str(c) for c in self._constraints[:-1]])} or {self._constraints[-1]}'
+            constraints_str = ', '.join(str(c) for c in self._constraints[:-1])
+            return f'{constraints_str} or {self._constraints[-1]}'
 
     class HasMethods(_Constraint):
         """Constraint representing objects that expose specific methods.
@@ -541,9 +545,10 @@ if sklearn_version < parse_version('1.4'):
 
         def __str__(self):
             if len(self.methods) == 1:
-                methods = f'{self.methods[0]!r}'
+                methods = repr(self.methods[0])
             else:
-                methods = f'{', '.join([repr(m) for m in self.methods[:-1]])} and {self.methods[-1]!r}'
+                methods_str = ', '.join(repr(m) for m in self.methods[:-1])
+                methods = f'{methods_str} and {self.methods[-1]!r}'
             return f'an object implementing {methods}'
 
     class _IterablesNotString(_Constraint):
@@ -575,7 +580,8 @@ if sklearn_version < parse_version('1.4'):
             return any(c.is_satisfied_by(val) for c in self._constraints)
 
         def __str__(self):
-            return f'{', '.join([str(c) for c in self._constraints[:-1]])} or {self._constraints[-1]}'
+            constraints_str = ', '.join(str(c) for c in self._constraints[:-1])
+            return f'{constraints_str} or {self._constraints[-1]}'
 
     class Hidden:
         """Class encapsulating a constraint not meant to be exposed to the user.
