@@ -884,6 +884,7 @@ if parse_version(sklearn_version.base_version) < parse_version('1.4'):
         .. versionadded:: 1.3
         """
         if TYPE_CHECKING:
+            pass
 
         def __init_subclass__(cls, **kwargs):
             """Set the ``set_{method}_request`` methods.
