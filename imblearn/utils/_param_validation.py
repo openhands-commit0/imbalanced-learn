@@ -59,7 +59,39 @@ if sklearn_version < parse_version('1.4'):
         caller_name : str
             The name of the estimator or function or method that called this function.
         """
-        pass
+        if parameter_constraints == "no_validation":
+            return
+
+        for param_name, param_val in params.items():
+            # Each parameter can be validated against a list of constraints.
+            # We keep track of the exceptions raised by each validator so we can
+            # give a meaningful message if all of them failed.
+            if param_name not in parameter_constraints:
+                continue
+
+            constraints = parameter_constraints[param_name]
+            constraints = [make_constraint(constraint) for constraint in constraints]
+
+            exceptions_raised = []
+            for constraint in constraints:
+                try:
+                    if constraint.is_satisfied_by(param_val):
+                        # We found a valid constraint
+                        break
+                except Exception as e:
+                    exceptions_raised.append(e)
+            else:
+                # No constraint was found to be valid
+                constraints_str = ", ".join(str(c) for c in constraints)
+                error_msg = (
+                    f"The {param_name!r} parameter of {caller_name} must be "
+                    f"{constraints_str}. Got {param_val!r} instead."
+                )
+                if exceptions_raised:
+                    error_msg += (
+                        f" The following errors were raised: {exceptions_raised}"
+                    )
+                raise InvalidParameterError(error_msg)
 
     def make_constraint(constraint):
         """Convert the constraint into the appropriate Constraint object.
@@ -74,7 +106,35 @@ if sklearn_version < parse_version('1.4'):
         constraint : instance of _Constraint
             The converted constraint.
         """
-        pass
+        if isinstance(constraint, _Constraint):
+            return constraint
+        elif isinstance(constraint, type):
+            return _InstancesOf(constraint)
+        elif constraint is None:
+            return _NoneConstraint()
+        elif constraint == "array-like":
+            return _ArrayLikes()
+        elif constraint == "sparse matrix":
+            return _SparseMatrices()
+        elif constraint == "random_state":
+            return _RandomStates()
+        elif constraint == "boolean":
+            return _Booleans()
+        elif constraint == "verbose":
+            return _VerboseHelper()
+        elif constraint == "cv_object":
+            return _CVObjects()
+        elif constraint == "nan":
+            return _NanConstraint()
+        elif callable(constraint):
+            return _Callables()
+        else:
+            raise ValueError(
+                f"Unknown constraint type: {constraint}. "
+                "Valid constraints are: instance of _Constraint, type, None, "
+                "'array-like', 'sparse matrix', 'random_state', 'boolean', "
+                "'verbose', 'cv_object', 'nan', or callable."
+            )
 
     def validate_params(parameter_constraints, *, prefer_skip_nested_validation):
         """Decorator to validate types and values of functions and methods.
@@ -107,7 +167,33 @@ if sklearn_version < parse_version('1.4'):
         decorated_function : function or method
             The decorated function.
         """
-        pass
+        def decorator(func):
+            # Get the signature of the function to be decorated
+            sig = signature(func)
+
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                # Map *args and **kwargs to the function signature to get a dict of
+                # parameters
+                params = sig.bind(*args, **kwargs)
+                params.apply_defaults()
+                params = params.arguments
+
+                # Skip validation if the config flag is set
+                if get_config()["skip_parameter_validation"]:
+                    return func(*args, **kwargs)
+
+                # Skip validation if we are in a nested validation context and
+                # prefer_skip_nested_validation is True
+                with config_context(skip_parameter_validation=prefer_skip_nested_validation):
+                    validate_parameter_constraints(
+                        parameter_constraints, params, func.__qualname__
+                    )
+                    return func(*args, **kwargs)
+
+            return wrapper
+
+        return decorator
 
     class RealNotInt(Real):
         """A type that represents reals that are not instances of int.
@@ -120,7 +206,11 @@ if sklearn_version < parse_version('1.4'):
 
     def _type_name(t):
         """Convert type into human readable string."""
-        pass
+        module = t.__module__
+        qualname = t.__qualname__
+        if module == "builtins":
+            return qualname
+        return f"{module}.{qualname}"
 
     class _Constraint(ABC):
         """Base class for the constraint objects."""
@@ -142,7 +232,7 @@ if sklearn_version < parse_version('1.4'):
             is_satisfied : bool
                 Whether or not the constraint is satisfied by this value.
             """
-            pass
+            raise NotImplementedError
 
         @abstractmethod
         def __str__(self):
@@ -161,11 +251,17 @@ if sklearn_version < parse_version('1.4'):
             super().__init__()
             self.type = type
 
+        def is_satisfied_by(self, val):
+            return isinstance(val, self.type)
+
         def __str__(self):
             return f'an instance of {_type_name(self.type)!r}'
 
     class _NoneConstraint(_Constraint):
         """Constraint representing the None singleton."""
+
+        def is_satisfied_by(self, val):
+            return val is None
 
         def __str__(self):
             return 'None'
@@ -173,11 +269,21 @@ if sklearn_version < parse_version('1.4'):
     class _NanConstraint(_Constraint):
         """Constraint representing the indicator `np.nan`."""
 
+        def is_satisfied_by(self, val):
+            return isinstance(val, Real) and math.isnan(val)
+
         def __str__(self):
             return 'numpy.nan'
 
     class _PandasNAConstraint(_Constraint):
         """Constraint representing the indicator `pd.NA`."""
+
+        def is_satisfied_by(self, val):
+            try:
+                import pandas as pd
+                return val is pd.NA
+            except ImportError:
+                return False
 
         def __str__(self):
             return 'pandas.NA'
@@ -207,10 +313,12 @@ if sklearn_version < parse_version('1.4'):
 
         def _mark_if_deprecated(self, option):
             """Add a deprecated mark to an option if needed."""
-            pass
+            if option in self.deprecated:
+                return f"{option} (DEPRECATED)"
+            return str(option)
 
         def __str__(self):
-            options_str = f'{', '.join([self._mark_if_deprecated(o) for o in self.options])}'
+            options_str = ', '.join([self._mark_if_deprecated(o) for o in self.options])
             return f'a {_type_name(self.type)} among {{{options_str}}}'
 
     class StrOptions(Options):
@@ -301,17 +409,26 @@ if sklearn_version < parse_version('1.4'):
     class _ArrayLikes(_Constraint):
         """Constraint representing array-likes"""
 
+        def is_satisfied_by(self, val):
+            return _is_arraylike_not_scalar(val)
+
         def __str__(self):
             return 'an array-like'
 
     class _SparseMatrices(_Constraint):
         """Constraint representing sparse matrices."""
 
+        def is_satisfied_by(self, val):
+            return issparse(val)
+
         def __str__(self):
             return 'a sparse matrix'
 
     class _Callables(_Constraint):
         """Constraint representing callables."""
+
+        def is_satisfied_by(self, val):
+            return callable(val)
 
         def __str__(self):
             return 'a callable'
@@ -327,6 +444,9 @@ if sklearn_version < parse_version('1.4'):
             super().__init__()
             self._constraints = [Interval(Integral, 0, 2 ** 32 - 1, closed='both'), _InstancesOf(np.random.RandomState), _NoneConstraint()]
 
+        def is_satisfied_by(self, val):
+            return any(c.is_satisfied_by(val) for c in self._constraints)
+
         def __str__(self):
             return f'{', '.join([str(c) for c in self._constraints[:-1]])} or {self._constraints[-1]}'
 
@@ -341,6 +461,9 @@ if sklearn_version < parse_version('1.4'):
             super().__init__()
             self._constraints = [_InstancesOf(bool), _InstancesOf(np.bool_)]
 
+        def is_satisfied_by(self, val):
+            return any(c.is_satisfied_by(val) for c in self._constraints)
+
         def __str__(self):
             return f'{', '.join([str(c) for c in self._constraints[:-1]])} or {self._constraints[-1]}'
 
@@ -354,6 +477,9 @@ if sklearn_version < parse_version('1.4'):
         def __init__(self):
             super().__init__()
             self._constraints = [Interval(Integral, 0, None, closed='left'), _InstancesOf(bool), _InstancesOf(np.bool_)]
+
+        def is_satisfied_by(self, val):
+            return any(c.is_satisfied_by(val) for c in self._constraints)
 
         def __str__(self):
             return f'{', '.join([str(c) for c in self._constraints[:-1]])} or {self._constraints[-1]}'
@@ -385,6 +511,9 @@ if sklearn_version < parse_version('1.4'):
             if not self.numeric_only:
                 self._constraints.extend([_InstancesOf(str), _NoneConstraint()])
 
+        def is_satisfied_by(self, val):
+            return any(c.is_satisfied_by(val) for c in self._constraints)
+
         def __str__(self):
             return f'{', '.join([str(c) for c in self._constraints[:-1]])} or {self._constraints[-1]}'
 
@@ -407,6 +536,9 @@ if sklearn_version < parse_version('1.4'):
                 methods = [methods]
             self.methods = methods
 
+        def is_satisfied_by(self, val):
+            return all(hasattr(val, method) and callable(getattr(val, method)) for method in self.methods)
+
         def __str__(self):
             if len(self.methods) == 1:
                 methods = f'{self.methods[0]!r}'
@@ -416,6 +548,9 @@ if sklearn_version < parse_version('1.4'):
 
     class _IterablesNotString(_Constraint):
         """Constraint representing iterables that are not strings."""
+
+        def is_satisfied_by(self, val):
+            return isinstance(val, Iterable) and not isinstance(val, str)
 
         def __str__(self):
             return 'an iterable'
@@ -435,6 +570,9 @@ if sklearn_version < parse_version('1.4'):
         def __init__(self):
             super().__init__()
             self._constraints = [Interval(Integral, 2, None, closed='left'), HasMethods(['split', 'get_n_splits']), _IterablesNotString(), _NoneConstraint()]
+
+        def is_satisfied_by(self, val):
+            return any(c.is_satisfied_by(val) for c in self._constraints)
 
         def __str__(self):
             return f'{', '.join([str(c) for c in self._constraints[:-1]])} or {self._constraints[-1]}'
